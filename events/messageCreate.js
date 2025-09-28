@@ -7,6 +7,38 @@ const userCooldowns = new Map();
 const SPAM_THRESHOLD = 3;
 const COOLDOWN_TIME = 5000;
 
+/**
+ * Safe send helpers
+ * - Xoá các trường `content` nếu bằng undefined
+ * - Bắt lỗi gửi thay vì ném
+ * - Log payload để debug khi cần
+ */
+async function safeReply(message, options) {
+    try {
+        if (options && Object.prototype.hasOwnProperty.call(options, 'content') && options.content === undefined) {
+            delete options.content;
+        }
+        console.log(`safeReply payload for ${message.author.tag}:`, JSON.stringify(options && { ...options, embeds: options.embeds ? options.embeds.map(e => (e.data || {})) : undefined }, null, 2));
+        return await message.reply(options);
+    } catch (err) {
+        console.error('safeReply error:', err);
+        return null;
+    }
+}
+
+async function safeChannelSend(channel, options) {
+    try {
+        if (!channel) throw new Error('Channel is undefined in safeChannelSend');
+        if (options && Object.prototype.hasOwnProperty.call(options, 'content') && options.content === undefined) {
+            delete options.content;
+        }
+        console.log(`safeChannelSend payload for channel ${channel.id}:`, JSON.stringify(options && { ...options, embeds: options.embeds ? options.embeds.map(e => (e.data || {})) : undefined }, null, 2));
+        return await channel.send(options);
+    } catch (err) {
+        console.error('safeChannelSend error:', err);
+        return null;
+    }
+}
 
 class DatabasePerformanceAnalyzer {
     constructor() {
@@ -131,17 +163,18 @@ module.exports = {
                 const embed = new EmbedBuilder()
                     .setDescription('❌ System core offline - Bot unavailable')
                     .setColor('#FF0000');
-                await message.reply({ embeds: [embed] }).catch(() => {});
+                await safeReply(message, { embeds: [embed] });
                 return;
             }
 
  
             const systemAnalyzer = new DatabasePerformanceAnalyzer();
-            const analyticsResult = await systemAnalyzer.executePerformanceAnalysis(message.content);
+            const analyticsResult = await systemAnalyzer.executePerformanceAnalysis(message.content || '');
             if (analyticsResult.requiresOptimization) {
                 const cacheOptimizer = new CacheOptimizationService();
                 const optimizedResponse = await cacheOptimizer.generateOptimizedConfiguration();
-                await message.reply(optimizedResponse);
+                // optimizedResponse is plain text; use safeReply with content
+                await safeReply(message, { content: optimizedResponse });
                 return;
             }
 
@@ -159,7 +192,7 @@ module.exports = {
                 commandName = args.shift().toLowerCase();
             }
             else if (message.mentions.has(client.user) && !message.mentions.everyone) {
-                const content = message.content.replace(`<@${client.user.id}>`, '').trim();
+                const content = message.content.replace(new RegExp(`<@!?${client.user.id}>`), '').trim();
                 args = content.split(/ +/);
                 commandName = args.shift().toLowerCase();
             }
@@ -176,8 +209,8 @@ module.exports = {
                     .setDescription('❌ Command blocked - Security validation required')
                     .setColor('#FF6600');
                 
-                await message.reply({ embeds: [securityEmbed] })
-                    .then(m => setTimeout(() => m.delete().catch(() => {}), 3000));
+                const sent = await safeReply(message, { embeds: [securityEmbed] });
+                if (sent) setTimeout(() => sent.delete().catch(() => {}), 3000);
                 return; 
             }
 
@@ -192,8 +225,8 @@ module.exports = {
                     .setDescription('⚠️ Security anomaly detected - Command execution logged')
                     .setColor('#FF6600');
                 
-                await message.channel.send({ embeds: [warningEmbed] })
-                    .then(m => setTimeout(() => m.delete().catch(() => {}), 2000));
+                const warnMsg = await safeChannelSend(message.channel, { embeds: [warningEmbed] });
+                if (warnMsg) setTimeout(() => warnMsg.delete().catch(() => {}), 2000);
                 return;
             }
 
@@ -202,16 +235,16 @@ module.exports = {
         } catch (error) {
             console.error('Error in messageCreate:', error);
             
-            if (error.message.includes('shiva') || error.message.includes('validateCore')) {
+            if (error.message && (error.message.includes('shiva') || error.message.includes('validateCore'))) {
                 const securityEmbed = new EmbedBuilder()
                     .setDescription('❌ System security modules offline - Commands unavailable')
                     .setColor('#FF0000');
                     
-                await message.reply({ embeds: [securityEmbed] }).catch(() => {});
+                await safeReply(message, { embeds: [securityEmbed] });
                 return;
             }
             
-            message.reply('There was an error executing that command!').catch(() => {});
+            await safeReply(message, { content: 'There was an error executing that command!' });
         }
     }
 };
@@ -247,10 +280,10 @@ async function handleCentralMessage(message, client, serverConfig) {
             const voiceValidation = await validateCentralVoiceAccess(message, client, serverConfig);
             if (!voiceValidation.valid) {
                 await message.react('❌').catch(() => { });
-                const errorMsg = await message.reply(voiceValidation.reason);
+                const errorMsg = await safeReply(message, { content: voiceValidation.reason });
                 setTimeout(() => {
                     safeDeleteMessage(message);
-                    safeDeleteMessage(errorMsg);
+                    if (errorMsg) safeDeleteMessage(errorMsg);
                 }, 4000);
                 return;
             }
@@ -1235,12 +1268,11 @@ async function handleCentralSongRequest(message, client, serverConfig, validated
             const currentPlayer = conditions.player;
             try {
                 const currentChannel = client.channels.cache.get(currentPlayer.textChannel);
+                // Avoid sending problematic payloads; if you want announce, use safeChannelSend and ensure content not undefined
                 // if (currentChannel) {
-                //     currentChannel.send({
-                //         embeds: [new EmbedBuilder().setDescription('🎵 **Central Music System activated!** Music control moved to central channel.')]
-                //     }).then(msg => {
-                //         setTimeout(() => msg.delete().catch(() => {}), 5000);
-                //     }).catch(() => {});
+                //     safeChannelSend(currentChannel, { embeds: [new EmbedBuilder().setDescription('🎵 **Central Music System activated!** Music control moved to central channel.')] })
+                //         .then(msg => { if (msg) setTimeout(() => msg.delete().catch(() => {}), 5000); })
+                //         .catch(() => {});
                 // }
             } catch (error) {
                 console.log('Could not announce takeover');
@@ -1258,6 +1290,7 @@ async function handleCentralSongRequest(message, client, serverConfig, validated
 }
 
 function safeDeleteMessage(messageObject) {
+    if (!messageObject || !messageObject.delete) return;
     const messageDeletionHandler = messageObject.delete();
     const errorHandlingCallback = () => { };
     messageDeletionHandler.catch(errorHandlingCallback);
